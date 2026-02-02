@@ -267,14 +267,9 @@ with st.sidebar:
     region = st.selectbox("지역(region)", ["KR", "US", "JP", "GB"], index=0)
 
     min_vote_count = st.slider("최소 투표 수(vote_count.gte)", 0, 5000, 200, step=50)
-    min_vote_average = st.slider(
-        "최소 평점 (10점 만점)",
-        min_value=0.0,
-        max_value=10.0,
-        value=6.5,
-        step=0.5,
-    )
-
+    min_vote_average = st.slider("최소 평점(vote_average.gte)", 0.0, 10.0, 5.0, step=0.1)
+    years_back = st.slider("최근 몇 년 작품 위주", 0, 30, 10, step=1)
+    st.caption("필터를 올릴수록 추천이 ‘깔끔’해지지만 결과가 줄어들 수 있어요.")
 
 st.divider()
 
