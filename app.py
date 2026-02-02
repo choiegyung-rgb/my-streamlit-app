@@ -1,5 +1,6 @@
 import time
 from collections import defaultdict
+from datetime import date
 from typing import Dict, List, Tuple, Any, Optional
 
 import requests
@@ -36,6 +37,15 @@ GENRE_REASON = {
     "판타지": "현실을 잠시 벗어나 세계관에 푹 빠지는 걸 좋아하는 성향이 보여서, 모험적인 판타지가 잘 맞아요.",
 }
 
+# 질문별 가중치 (우선순위 개선점 #1)
+QUESTION_WEIGHTS = {
+    "q1": 1.0,
+    "q2": 1.0,
+    "q3": 1.8,  # '영화에서 중요한 것'은 장르 성향에 가장 직접적
+    "q4": 1.1,
+    "q5": 1.0,
+}
+
 ANSWER_TO_GENRE_SCORES: Dict[str, Dict[str, int]] = {
     # Q1
     "집에서 휴식": {"드라마": 2, "로맨스": 1},
@@ -68,28 +78,31 @@ ANSWER_TO_GENRE_SCORES: Dict[str, Dict[str, int]] = {
 # =========================
 # Helpers: scoring / reasons
 # =========================
-def score_genres(answers: List[str]) -> Tuple[Dict[str, int], Dict[str, List[str]]]:
-    scores = defaultdict(int)
+def score_genres_weighted(answers_by_q: Dict[str, str]) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
+    """
+    우선순위 개선점 #1
+    - 질문별 가중치 반영
+    - evidence(근거 답변)도 같이 모음
+    """
+    scores = defaultdict(float)
     evidence = defaultdict(list)
-    for a in answers:
-        mapping = ANSWER_TO_GENRE_SCORES.get(a, {})
+
+    for qkey, ans in answers_by_q.items():
+        w = QUESTION_WEIGHTS.get(qkey, 1.0)
+        mapping = ANSWER_TO_GENRE_SCORES.get(ans, {})
         for g, s in mapping.items():
-            scores[g] += s
-            evidence[g].append(a)
+            scores[g] += s * w
+            evidence[g].append(ans)
+
     return dict(scores), dict(evidence)
 
 
-def pick_genre_strategy(scores: Dict[str, int]) -> Tuple[List[str], str]:
+def pick_top_genres(scores: Dict[str, float], k: int = 3) -> List[str]:
     if not scores:
-        return ["드라마"], "기본값(드라마)"
-
+        return ["드라마"]
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    best, best_score = ranked[0]
-    second, second_score = ranked[1] if len(ranked) > 1 else (None, None)
-
-    if second and (best_score - second_score) <= 2:
-        return [best, second], f"복합 장르({best} + {second})"
-    return [best], f"단일 장르({best})"
+    top = [g for g, _ in ranked[:k]]
+    return top
 
 
 def make_overall_reason(selected_genres: List[str], evidence: Dict[str, List[str]]) -> str:
@@ -105,12 +118,20 @@ def make_overall_reason(selected_genres: List[str], evidence: Dict[str, List[str
     return "\n".join(parts)
 
 
-def per_movie_reason(selected_genres: List[str]) -> str:
-    if len(selected_genres) == 1:
-        g = selected_genres[0]
-        return f"당신의 성향과 가장 잘 맞는 **{g}** 장르의 인기작이라 추천해요."
-    g1, g2 = selected_genres[0], selected_genres[1]
-    return f"당신의 성향(**{g1}+{g2}**)에 맞는 톤을 가진 인기작이라 추천해요."
+def per_movie_reason(main_genre: str, sub_genres: List[str]) -> str:
+    if not sub_genres:
+        return f"당신의 메인 취향인 **{main_genre}** 장르와 잘 맞아서 추천해요."
+    sub_label = "+".join(sub_genres[:2])
+    return f"당신의 취향(**{main_genre}** / {sub_label})과 비슷한 톤의 인기작이라 추천해요."
+
+
+def normalize_scores(scores: Dict[str, float]) -> Dict[str, float]:
+    if not scores:
+        return {}
+    max_v = max(scores.values())
+    if max_v <= 0:
+        return {k: 0.0 for k in scores}
+    return {k: v / max_v for k, v in scores.items()}
 
 
 # =========================
@@ -145,10 +166,21 @@ def discover_movies(
     language: str,
     region: str,
     min_vote_count: int,
+    min_vote_average: float,
+    years_back: int,
     page: int = 1,
 ) -> List[Dict[str, Any]]:
+    """
+    우선순위 개선점 #2
+    - vote_average.gte + release_date.gte(최근 N년) 옵션 추가
+    """
     session = requests.Session()
     url = f"{TMDB_BASE}/discover/movie"
+
+    today = date.today()
+    gte_year = max(today.year - years_back, 1900)
+    release_gte = f"{gte_year}-01-01"
+
     params = {
         "api_key": api_key,
         "with_genres": ",".join(map(str, genre_ids)),
@@ -157,6 +189,8 @@ def discover_movies(
         "include_adult": "false",
         "sort_by": "popularity.desc",
         "vote_count.gte": min_vote_count,
+        "vote_average.gte": min_vote_average,
+        "primary_release_date.gte": release_gte,
         "page": page,
     }
     data = _tmdb_get(session, url, params)
@@ -164,27 +198,15 @@ def discover_movies(
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def movie_details_with_videos(
-    api_key: str,
-    movie_id: int,
-    language: str,
-) -> Dict[str, Any]:
+def movie_details_with_videos(api_key: str, movie_id: int, language: str) -> Dict[str, Any]:
     session = requests.Session()
     url = f"{TMDB_BASE}/movie/{movie_id}"
-    params = {
-        "api_key": api_key,
-        "language": language,
-        "append_to_response": "videos",
-    }
+    params = {"api_key": api_key, "language": language, "append_to_response": "videos"}
     return _tmdb_get(session, url, params)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def movie_details_basic(
-    api_key: str,
-    movie_id: int,
-    language: str,
-) -> Dict[str, Any]:
+def movie_details_basic(api_key: str, movie_id: int, language: str) -> Dict[str, Any]:
     session = requests.Session()
     url = f"{TMDB_BASE}/movie/{movie_id}"
     params = {"api_key": api_key, "language": language}
@@ -206,6 +228,29 @@ def poster_url(poster_path: Optional[str]) -> Optional[str]:
 
 
 # =========================
+# Session state (우선순위 개선점 #3)
+# =========================
+if "result" not in st.session_state:
+    st.session_state.result = None
+
+if "candidates" not in st.session_state:
+    st.session_state.candidates = []
+
+if "selected" not in st.session_state:
+    st.session_state.selected = []
+
+if "scores" not in st.session_state:
+    st.session_state.scores = {}
+
+
+def clear_result():
+    st.session_state.result = None
+    st.session_state.candidates = []
+    st.session_state.selected = []
+    st.session_state.scores = {}
+
+
+# =========================
 # UI
 # =========================
 st.title("🎬 나와 어울리는 영화는?")
@@ -217,69 +262,83 @@ with st.sidebar:
     st.caption("키는 저장되지 않아요. (세션 동안만 사용)")
 
     st.divider()
-    st.subheader("추천 옵션")
+    st.subheader("추천 필터 (고도화)")
     language = st.selectbox("언어(language)", ["ko-KR", "en-US"], index=0)
     region = st.selectbox("지역(region)", ["KR", "US", "JP", "GB"], index=0)
+
     min_vote_count = st.slider("최소 투표 수(vote_count.gte)", 0, 5000, 200, step=50)
+    min_vote_average = st.slider("최소 평점(vote_average.gte)", 0.0, 9.0, 6.6, step=0.1)
+    years_back = st.slider("최근 몇 년 작품 위주", 0, 30, 10, step=1)
+    st.caption("필터를 올릴수록 추천이 ‘깔끔’해지지만 결과가 줄어들 수 있어요.")
 
 st.divider()
 
-q1 = st.radio(
-    "1. 주말에 가장 하고 싶은 것은?",
-    ["집에서 휴식", "친구와 놀기", "새로운 곳 탐험", "혼자 취미생활"],
-    index=None,
-)
-q2 = st.radio(
-    "2. 스트레스 받으면?",
-    ["혼자 있기", "수다 떨기", "운동하기", "맛있는 거 먹기"],
-    index=None,
-)
-q3 = st.radio(
-    "3. 영화에서 중요한 것은?",
-    ["감동 스토리", "시각적 영상미", "깊은 메시지", "웃는 재미"],
-    index=None,
-)
-q4 = st.radio(
-    "4. 여행 스타일?",
-    ["계획적", "즉흥적", "액티비티", "힐링"],
-    index=None,
-)
-q5 = st.radio(
-    "5. 친구 사이에서 나는?",
-    ["듣는 역할", "주도하기", "분위기 메이커", "필요할 때 나타남"],
-    index=None,
-)
+# Questions
+q1 = st.radio("1. 주말에 가장 하고 싶은 것은?", ["집에서 휴식", "친구와 놀기", "새로운 곳 탐험", "혼자 취미생활"], index=None)
+q2 = st.radio("2. 스트레스 받으면?", ["혼자 있기", "수다 떨기", "운동하기", "맛있는 거 먹기"], index=None)
+q3 = st.radio("3. 영화에서 중요한 것은?", ["감동 스토리", "시각적 영상미", "깊은 메시지", "웃는 재미"], index=None)
+q4 = st.radio("4. 여행 스타일?", ["계획적", "즉흥적", "액티비티", "힐링"], index=None)
+q5 = st.radio("5. 친구 사이에서 나는?", ["듣는 역할", "주도하기", "분위기 메이커", "필요할 때 나타남"], index=None)
 
-answers = [q1, q2, q3, q4, q5]
+answers_by_q = {"q1": q1, "q2": q2, "q3": q3, "q4": q4, "q5": q5}
 
 st.divider()
 
+# Actions
+action_cols = st.columns([1, 1, 6])
+with action_cols[0]:
+    run_btn = st.button("결과 보기", type="primary")
+with action_cols[1]:
+    st.button("다시 하기", on_click=clear_result)
+
 # =========================
-# Result button
+# Run recommendation
 # =========================
-if st.button("결과 보기", type="primary"):
+if run_btn:
     if not api_key:
         st.error("사이드바에 TMDB API Key를 입력해주세요.")
         st.stop()
-    if any(a is None for a in answers):
+    if any(v is None for v in answers_by_q.values()):
         st.warning("모든 질문에 답변을 선택해주세요!")
         st.stop()
 
     with st.spinner("분석 중..."):
-        scores, evidence = score_genres(answers)
-        selected_genres, strategy_label = pick_genre_strategy(scores)
-        selected_genre_ids = [GENRES[g] for g in selected_genres]
+        scores, evidence = score_genres_weighted(answers_by_q)
+        top3 = pick_top_genres(scores, k=3)
+        main_genre = top3[0]
+        sub_genres = top3[1:]
 
+        # 추천은 메인+서브(Top2)로 검색하되, 결과 부족하면 메인만 fallback
+        genre_ids_top2 = [GENRES[main_genre]]
+        if sub_genres:
+            genre_ids_top2.append(GENRES[sub_genres[0]])
+
+        # 1) top2로 먼저 가져오기
         raw = discover_movies(
             api_key=api_key,
-            genre_ids=selected_genre_ids,
+            genre_ids=genre_ids_top2,
             language=language,
             region=region,
             min_vote_count=min_vote_count,
+            min_vote_average=min_vote_average,
+            years_back=years_back,
             page=1,
         )
 
-        # 후보 9개(3열 카드에 3행까지 예쁘게)까지 확보 후 6~9개 표시
+        # 2) 결과 부족하면 메인 장르만으로 fallback
+        if len(raw) < 6:
+            raw = discover_movies(
+                api_key=api_key,
+                genre_ids=[GENRES[main_genre]],
+                language=language,
+                region=region,
+                min_vote_count=min_vote_count,
+                min_vote_average=min_vote_average,
+                years_back=years_back,
+                page=1,
+            )
+
+        # 후보 최대 9개 확보(3열 카드)
         candidates = []
         seen = set()
         for m in raw:
@@ -292,24 +351,47 @@ if st.button("결과 보기", type="primary"):
                 break
 
         if not candidates:
-            st.info("추천할 영화를 찾지 못했어요. (조건을 완화해보세요: 최소 투표 수 낮추기 등)")
+            st.info("추천할 영화를 찾지 못했어요. (필터를 낮추거나 최근 연도를 늘려보세요.)")
             st.stop()
 
-    # ===== Pretty Result Header =====
-    genre_label = " + ".join(selected_genres)
-    st.markdown(f"## 🎉 당신에게 딱인 장르는: **{genre_label}**!")
-    st.caption(f"선정 방식: {strategy_label}")
+    # Session state에 저장 (우선순위 개선점 #3)
+    st.session_state.result = {
+        "top3": top3,
+        "main_genre": main_genre,
+        "sub_genres": sub_genres,
+        "reason_text": make_overall_reason(top3, evidence),
+    }
+    st.session_state.candidates = candidates
+    st.session_state.scores = scores
+
+
+# =========================
+# Render result (if exists)
+# =========================
+if st.session_state.result:
+    top3 = st.session_state.result["top3"]
+    main_genre = st.session_state.result["main_genre"]
+    sub_genres = st.session_state.result["sub_genres"]
+
+    label = main_genre if not sub_genres else f"{main_genre} + {sub_genres[0]}"
+    st.markdown(f"## 🎉 당신에게 딱인 장르는: **{label}**!")
+    st.caption(f"메인 취향: {main_genre} · 서브 취향: {', '.join(sub_genres) if sub_genres else '없음'}")
+
+    # 우선순위 개선점 #1/2와 연결: 점수 바 차트(시각화)
+    norm = normalize_scores(st.session_state.scores)
+    chart_data = {g: norm.get(g, 0.0) for g in ["드라마", "로맨스", "코미디", "액션", "SF", "판타지"]}
+    st.markdown("#### 🎯 당신의 장르 성향(상대 점수)")
+    st.bar_chart(chart_data)
 
     with st.expander("왜 이렇게 추천했나요?"):
-        st.write(make_overall_reason(selected_genres, evidence))
+        st.write(st.session_state.result["reason_text"])
 
     st.divider()
+    st.subheader("🎥 추천 영화")
 
-    # =========================
     # 3-column cards
-    # =========================
     cols = st.columns(3)
-    for i, m in enumerate(candidates):
+    for i, m in enumerate(st.session_state.candidates):
         col = cols[i % 3]
         with col:
             movie_id = m.get("id")
@@ -317,7 +399,6 @@ if st.button("결과 보기", type="primary"):
             rating = float(m.get("vote_average") or 0.0)
             p_url = poster_url(m.get("poster_path"))
 
-            # "카드" 느낌을 위해 컨테이너 + 약간의 여백
             with st.container(border=True):
                 if p_url:
                     st.image(p_url, use_container_width=True)
@@ -327,7 +408,6 @@ if st.button("결과 보기", type="primary"):
                 st.markdown(f"**{title}**")
                 st.write(f"⭐ **{rating:.1f}** / 10")
 
-                # 클릭(열기) 시 상세를 보여주는 expander
                 with st.expander("상세 보기"):
                     with st.spinner("상세 정보를 불러오는 중..."):
                         details = None
@@ -337,23 +417,24 @@ if st.button("결과 보기", type="primary"):
                             except requests.RequestException:
                                 details = None
 
-                        # 실패 시 discover 데이터로라도 표시
                         d = details if isinstance(details, dict) else m
-
                         overview = d.get("overview") or ""
+
                         if not overview and language != "en-US" and movie_id:
-                            # ko-KR에 overview가 없으면 en-US 폴백
                             try:
                                 d2 = movie_details_basic(api_key, int(movie_id), language="en-US")
                                 overview = d2.get("overview") or overview
                             except requests.RequestException:
                                 pass
+
                         if not overview:
                             overview = "줄거리 정보가 없어요."
 
                         trailer = pick_trailer_url(d) if isinstance(d, dict) and d.get("videos") else None
 
                     st.write(overview)
-                    st.caption("이 영화를 추천하는 이유: " + per_movie_reason(selected_genres))
+                    st.caption("이 영화를 추천하는 이유: " + per_movie_reason(main_genre, sub_genres))
                     if trailer:
                         st.link_button("예고편 보기(YouTube)", trailer)
+else:
+    st.info("왼쪽에서 TMDB 키를 입력하고, 질문에 답한 뒤 **결과 보기**를 눌러주세요!")
