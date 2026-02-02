@@ -9,7 +9,7 @@ import streamlit as st
 # =========================
 # Page config
 # =========================
-st.set_page_config(page_title="나와 어울리는 영화는?", page_icon="🎬")
+st.set_page_config(page_title="나와 어울리는 영화는?", page_icon="🎬", layout="wide")
 
 
 # =========================
@@ -36,7 +36,6 @@ GENRE_REASON = {
     "판타지": "현실을 잠시 벗어나 세계관에 푹 빠지는 걸 좋아하는 성향이 보여서, 모험적인 판타지가 잘 맞아요.",
 }
 
-# 질문/선택지 → 장르 점수 매핑(휴리스틱)
 ANSWER_TO_GENRE_SCORES: Dict[str, Dict[str, int]] = {
     # Q1
     "집에서 휴식": {"드라마": 2, "로맨스": 1},
@@ -81,11 +80,6 @@ def score_genres(answers: List[str]) -> Tuple[Dict[str, int], Dict[str, List[str
 
 
 def pick_genre_strategy(scores: Dict[str, int]) -> Tuple[List[str], str]:
-    """
-    Returns:
-      - selected_genres: [best] or [best, second] (top2 조합)
-      - label: 표시용 설명
-    """
     if not scores:
         return ["드라마"], "기본값(드라마)"
 
@@ -93,7 +87,6 @@ def pick_genre_strategy(scores: Dict[str, int]) -> Tuple[List[str], str]:
     best, best_score = ranked[0]
     second, second_score = ranked[1] if len(ranked) > 1 else (None, None)
 
-    # 점수 차가 작으면(예: 2점 이하) Top2 조합 추천
     if second and (best_score - second_score) <= 2:
         return [best, second], f"복합 장르({best} + {second})"
     return [best], f"단일 장르({best})"
@@ -113,7 +106,6 @@ def make_overall_reason(selected_genres: List[str], evidence: Dict[str, List[str
 
 
 def per_movie_reason(selected_genres: List[str]) -> str:
-    # 영화별 이유는 너무 길어지지 않게 1줄로
     if len(selected_genres) == 1:
         g = selected_genres[0]
         return f"당신의 성향과 가장 잘 맞는 **{g}** 장르의 인기작이라 추천해요."
@@ -131,16 +123,11 @@ def _tmdb_get(
     max_retries: int = 2,
     backoff_sec: float = 0.8,
 ) -> Dict[str, Any]:
-    """
-    - 429/네트워크 오류 등에 대해 아주 가벼운 재시도
-    - Streamlit 앱에서 과도한 복잡성 없이 안정성만 보강
-    """
     last_exc = None
     for i in range(max_retries + 1):
         try:
             r = session.get(url, params=params, timeout=15)
             if r.status_code == 429:
-                # 간단 백오프 후 재시도
                 time.sleep(backoff_sec * (i + 1))
                 continue
             r.raise_for_status()
@@ -182,9 +169,6 @@ def movie_details_with_videos(
     movie_id: int,
     language: str,
 ) -> Dict[str, Any]:
-    """
-    append_to_response=videos 로 상세+예고편을 한 번에 가져옴
-    """
     session = requests.Session()
     url = f"{TMDB_BASE}/movie/{movie_id}"
     params = {
@@ -208,9 +192,6 @@ def movie_details_basic(
 
 
 def pick_trailer_url(details: Dict[str, Any]) -> Optional[str]:
-    """
-    videos.results 에서 YouTube trailer 하나를 고름
-    """
     videos = (details.get("videos") or {}).get("results") or []
     for v in videos:
         if v.get("site") == "YouTube" and (v.get("type") in ["Trailer", "Teaser"]):
@@ -221,9 +202,7 @@ def pick_trailer_url(details: Dict[str, Any]) -> Optional[str]:
 
 
 def poster_url(poster_path: Optional[str]) -> Optional[str]:
-    if poster_path:
-        return POSTER_BASE + poster_path
-    return None
+    return (POSTER_BASE + poster_path) if poster_path else None
 
 
 # =========================
@@ -242,8 +221,6 @@ with st.sidebar:
     language = st.selectbox("언어(language)", ["ko-KR", "en-US"], index=0)
     region = st.selectbox("지역(region)", ["KR", "US", "JP", "GB"], index=0)
     min_vote_count = st.slider("최소 투표 수(vote_count.gte)", 0, 5000, 200, step=50)
-    st.caption("투표 수를 올리면 덜 알려진 작품이 줄고, 더 ‘검증된’ 작품 위주로 나와요.")
-
 
 st.divider()
 
@@ -277,6 +254,9 @@ answers = [q1, q2, q3, q4, q5]
 
 st.divider()
 
+# =========================
+# Result button
+# =========================
 if st.button("결과 보기", type="primary"):
     if not api_key:
         st.error("사이드바에 TMDB API Key를 입력해주세요.")
@@ -290,8 +270,6 @@ if st.button("결과 보기", type="primary"):
         selected_genres, strategy_label = pick_genre_strategy(scores)
         selected_genre_ids = [GENRES[g] for g in selected_genres]
 
-        # Discover 결과를 넉넉히 가져온 뒤(최소 20개),
-        # 포스터/줄거리 있는 것 위주로 5개를 뽑는 방식
         raw = discover_movies(
             api_key=api_key,
             genre_ids=selected_genre_ids,
@@ -301,90 +279,81 @@ if st.button("결과 보기", type="primary"):
             page=1,
         )
 
-        # 후보 필터링 + 중복 제거
-        picked = []
+        # 후보 9개(3열 카드에 3행까지 예쁘게)까지 확보 후 6~9개 표시
+        candidates = []
         seen = set()
         for m in raw:
             mid = m.get("id")
             if not mid or mid in seen:
                 continue
             seen.add(mid)
-            picked.append(m)
-            if len(picked) >= 10:  # 5개 뽑기 위한 예비 후보
+            candidates.append(m)
+            if len(candidates) >= 9:
                 break
 
-        if not picked:
+        if not candidates:
             st.info("추천할 영화를 찾지 못했어요. (조건을 완화해보세요: 최소 투표 수 낮추기 등)")
             st.stop()
 
-    # ===== 결과 표시 =====
-    best_label = " + ".join(selected_genres)
-    st.subheader(f"✅ 당신에게 어울리는 장르: **{best_label}**")
+    # ===== Pretty Result Header =====
+    genre_label = " + ".join(selected_genres)
+    st.markdown(f"## 🎉 당신에게 딱인 장르는: **{genre_label}**!")
     st.caption(f"선정 방식: {strategy_label}")
 
-    st.markdown("#### 왜 이렇게 추천했나요?")
-    st.write(make_overall_reason(selected_genres, evidence))
-
-    with st.expander("장르 점수 보기(디버그)"):
-        st.json(scores)
+    with st.expander("왜 이렇게 추천했나요?"):
+        st.write(make_overall_reason(selected_genres, evidence))
 
     st.divider()
-    st.subheader("🎥 인기 영화 추천 5편")
 
-    # 실제로 5개만 출력 (상세는 append_to_response=videos로 가져오고,
-    # overview가 비어 있으면 en-US 폴백)
-    shown = 0
-    for m in picked:
-        if shown >= 5:
-            break
+    # =========================
+    # 3-column cards
+    # =========================
+    cols = st.columns(3)
+    for i, m in enumerate(candidates):
+        col = cols[i % 3]
+        with col:
+            movie_id = m.get("id")
+            title = m.get("title") or "제목 없음"
+            rating = float(m.get("vote_average") or 0.0)
+            p_url = poster_url(m.get("poster_path"))
 
-        movie_id = m.get("id")
-        if not movie_id:
-            continue
+            # "카드" 느낌을 위해 컨테이너 + 약간의 여백
+            with st.container(border=True):
+                if p_url:
+                    st.image(p_url, use_container_width=True)
+                else:
+                    st.image("https://via.placeholder.com/500x750?text=No+Poster", use_container_width=True)
 
-        # 1) 상세+videos(예고편)
-        try:
-            details = movie_details_with_videos(api_key, int(movie_id), language=language)
-        except requests.RequestException:
-            # 상세 실패 시 discover 데이터로라도 표시
-            details = m
+                st.markdown(f"**{title}**")
+                st.write(f"⭐ **{rating:.1f}** / 10")
 
-        title = details.get("title") or "제목 없음"
-        rating = details.get("vote_average", 0.0)
-        overview = details.get("overview") or ""
+                # 클릭(열기) 시 상세를 보여주는 expander
+                with st.expander("상세 보기"):
+                    with st.spinner("상세 정보를 불러오는 중..."):
+                        details = None
+                        if movie_id:
+                            try:
+                                details = movie_details_with_videos(api_key, int(movie_id), language=language)
+                            except requests.RequestException:
+                                details = None
 
-        # 2) 줄거리 폴백: ko-KR에서 비어 있으면 en-US로 한번 더
-        if not overview and language != "en-US":
-            try:
-                d2 = movie_details_basic(api_key, int(movie_id), language="en-US")
-                overview = d2.get("overview") or overview
-            except requests.RequestException:
-                pass
+                        # 실패 시 discover 데이터로라도 표시
+                        d = details if isinstance(details, dict) else m
 
-        if not overview:
-            overview = "줄거리 정보가 없어요."
+                        overview = d.get("overview") or ""
+                        if not overview and language != "en-US" and movie_id:
+                            # ko-KR에 overview가 없으면 en-US 폴백
+                            try:
+                                d2 = movie_details_basic(api_key, int(movie_id), language="en-US")
+                                overview = d2.get("overview") or overview
+                            except requests.RequestException:
+                                pass
+                        if not overview:
+                            overview = "줄거리 정보가 없어요."
 
-        poster = poster_url(details.get("poster_path"))
-        trailer = None
-        if isinstance(details, dict) and details.get("videos"):
-            trailer = pick_trailer_url(details)
+                        trailer = pick_trailer_url(d) if isinstance(d, dict) and d.get("videos") else None
 
-        cols = st.columns([1, 2], vertical_alignment="top")
-        with cols[0]:
-            if poster:
-                st.image(poster, use_container_width=True)
-            else:
-                st.image("https://via.placeholder.com/500x750?text=No+Poster", use_container_width=True)
-
-        with cols[1]:
-            st.markdown(f"### {title}")
-            st.write(f"⭐ 평점: **{float(rating):.1f}** / 10")
-            st.write(overview)
-
-            st.caption("이 영화를 추천하는 이유: " + per_movie_reason(selected_genres))
-
-            if trailer:
-                st.link_button("예고편 보기(YouTube)", trailer)
-
-        st.divider()
-        shown += 1
+                    st.write(overview)
+                    st.caption("이 영화를 추천하는 이유: " + per_movie_reason(selected_genres))
+                    if trailer:
+                        st.link_button("예고편 보기(YouTube)", trailer)
