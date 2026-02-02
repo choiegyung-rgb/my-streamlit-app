@@ -5,39 +5,12 @@ from typing import Dict, List, Tuple, Any, Optional
 
 import requests
 import streamlit as st
-import matplotlib.pyplot as plt
 
 
 # =========================
 # Page config
 # =========================
 st.set_page_config(page_title="나와 어울리는 영화는?", page_icon="🎬", layout="wide")
-
-
-# =========================
-# Minimal clean CSS
-# =========================
-st.markdown(
-    """
-    <style>
-      /* 전체 폭/여백 안정화 */
-      .block-container { padding-top: 2rem; padding-bottom: 2.5rem; }
-
-      /* 라디오 질문 간격 조금 타이트하게 */
-      div[data-testid="stRadio"] { padding: 0.25rem 0; }
-
-      /* 결과 섹션 타이틀 간격 */
-      h2, h3 { margin-top: 0.6rem; }
-
-      /* expander 헤더 조금 더 깔끔하게 */
-      details summary { font-weight: 600; }
-
-      /* 카드 내부 텍스트 줄 간격 */
-      .movie-meta { margin-top: 0.3rem; margin-bottom: 0.6rem; line-height: 1.25; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 # =========================
@@ -64,11 +37,11 @@ GENRE_REASON = {
     "판타지": "현실을 잠시 벗어나 세계관에 푹 빠지는 걸 좋아하는 성향이 보여서, 모험적인 판타지가 잘 맞아요.",
 }
 
-# 질문별 가중치
+# 질문별 가중치 (우선순위 개선점 #1)
 QUESTION_WEIGHTS = {
     "q1": 1.0,
     "q2": 1.0,
-    "q3": 1.8,  # 영화 취향 직결
+    "q3": 1.8,  # '영화에서 중요한 것'은 장르 성향에 가장 직접적
     "q4": 1.1,
     "q5": 1.0,
 }
@@ -106,6 +79,11 @@ ANSWER_TO_GENRE_SCORES: Dict[str, Dict[str, int]] = {
 # Helpers: scoring / reasons
 # =========================
 def score_genres_weighted(answers_by_q: Dict[str, str]) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
+    """
+    우선순위 개선점 #1
+    - 질문별 가중치 반영
+    - evidence(근거 답변)도 같이 모음
+    """
     scores = defaultdict(float)
     evidence = defaultdict(list)
 
@@ -123,7 +101,8 @@ def pick_top_genres(scores: Dict[str, float], k: int = 3) -> List[str]:
     if not scores:
         return ["드라마"]
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [g for g, _ in ranked[:k]]
+    top = [g for g, _ in ranked[:k]]
+    return top
 
 
 def make_overall_reason(selected_genres: List[str], evidence: Dict[str, List[str]]) -> str:
@@ -153,28 +132,6 @@ def normalize_scores(scores: Dict[str, float]) -> Dict[str, float]:
     if max_v <= 0:
         return {k: 0.0 for k in scores}
     return {k: v / max_v for k, v in scores.items()}
-
-
-def render_genre_bar_fixed(norm_scores: Dict[str, float]) -> None:
-    """
-    ✅ 고정 크기 그래프 (스크롤/휠로 확대/축소 안 됨)
-    - matplotlib figure size 고정
-    - 깔끔한 축/그리드 최소화
-    """
-    order = ["드라마", "로맨스", "코미디", "액션", "SF", "판타지"]
-    vals = [float(norm_scores.get(g, 0.0)) for g in order]
-
-    fig, ax = plt.subplots(figsize=(7.2, 2.6), dpi=120)  # 크기 고정
-    ax.bar(order, vals)
-    ax.set_ylim(0, 1.0)
-    ax.set_ylabel("상대 점수")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.grid(axis="y", alpha=0.25)
-    ax.tick_params(axis="x", rotation=0)
-    fig.tight_layout()
-
-    st.pyplot(fig, clear_figure=True)
 
 
 # =========================
@@ -213,6 +170,10 @@ def discover_movies(
     years_back: int,
     page: int = 1,
 ) -> List[Dict[str, Any]]:
+    """
+    우선순위 개선점 #2
+    - vote_average.gte + release_date.gte(최근 N년) 옵션 추가
+    """
     session = requests.Session()
     url = f"{TMDB_BASE}/discover/movie"
 
@@ -267,18 +228,25 @@ def poster_url(poster_path: Optional[str]) -> Optional[str]:
 
 
 # =========================
-# Session state
+# Session state (우선순위 개선점 #3)
 # =========================
 if "result" not in st.session_state:
     st.session_state.result = None
+
 if "candidates" not in st.session_state:
     st.session_state.candidates = []
+
+if "selected" not in st.session_state:
+    st.session_state.selected = []
+
 if "scores" not in st.session_state:
     st.session_state.scores = {}
+
 
 def clear_result():
     st.session_state.result = None
     st.session_state.candidates = []
+    st.session_state.selected = []
     st.session_state.scores = {}
 
 
@@ -286,7 +254,7 @@ def clear_result():
 # UI
 # =========================
 st.title("🎬 나와 어울리는 영화는?")
-st.write("질문 5개로 취향을 분석하고, TMDB 인기 영화로 추천해드려요 🙂")
+st.write("간단한 질문 5개로 당신의 영화 취향을 분석하고, TMDB에서 인기 영화 5편을 추천해드려요! 🙂")
 
 with st.sidebar:
     st.header("TMDB 설정")
@@ -294,18 +262,23 @@ with st.sidebar:
     st.caption("키는 저장되지 않아요. (세션 동안만 사용)")
 
     st.divider()
-    st.subheader("추천 필터")
+    st.subheader("추천 필터 (고도화)")
     language = st.selectbox("언어(language)", ["ko-KR", "en-US"], index=0)
     region = st.selectbox("지역(region)", ["KR", "US", "JP", "GB"], index=0)
+
     min_vote_count = st.slider("최소 투표 수(vote_count.gte)", 0, 5000, 200, step=50)
+    min_vote_average = st.slider(
+        "최소 평점 (10점 만점)",
+        min_value=0.0,
+        max_value=10.0,
+        value=6.5,
+        step=0.5,
+    )
 
-    # ✅ 0~10 범위 (이전 요청 반영)
-    min_vote_average = st.slider("최소 평점(vote_average.gte)", 0.0, 10.0, 6.6, step=0.1)
-
-    years_back = st.slider("최근 몇 년 작품 위주", 0, 30, 10, step=1)
 
 st.divider()
 
+# Questions
 q1 = st.radio("1. 주말에 가장 하고 싶은 것은?", ["집에서 휴식", "친구와 놀기", "새로운 곳 탐험", "혼자 취미생활"], index=None)
 q2 = st.radio("2. 스트레스 받으면?", ["혼자 있기", "수다 떨기", "운동하기", "맛있는 거 먹기"], index=None)
 q3 = st.radio("3. 영화에서 중요한 것은?", ["감동 스토리", "시각적 영상미", "깊은 메시지", "웃는 재미"], index=None)
@@ -316,12 +289,12 @@ answers_by_q = {"q1": q1, "q2": q2, "q3": q3, "q4": q4, "q5": q5}
 
 st.divider()
 
+# Actions
 action_cols = st.columns([1, 1, 6])
 with action_cols[0]:
     run_btn = st.button("결과 보기", type="primary")
 with action_cols[1]:
     st.button("다시 하기", on_click=clear_result)
-
 
 # =========================
 # Run recommendation
@@ -340,11 +313,12 @@ if run_btn:
         main_genre = top3[0]
         sub_genres = top3[1:]
 
-        # 메인 + 서브1 로 우선 검색, 부족하면 메인만
+        # 추천은 메인+서브(Top2)로 검색하되, 결과 부족하면 메인만 fallback
         genre_ids_top2 = [GENRES[main_genre]]
         if sub_genres:
             genre_ids_top2.append(GENRES[sub_genres[0]])
 
+        # 1) top2로 먼저 가져오기
         raw = discover_movies(
             api_key=api_key,
             genre_ids=genre_ids_top2,
@@ -356,6 +330,7 @@ if run_btn:
             page=1,
         )
 
+        # 2) 결과 부족하면 메인 장르만으로 fallback
         if len(raw) < 6:
             raw = discover_movies(
                 api_key=api_key,
@@ -368,6 +343,7 @@ if run_btn:
                 page=1,
             )
 
+        # 후보 최대 9개 확보(3열 카드)
         candidates = []
         seen = set()
         for m in raw:
@@ -383,6 +359,7 @@ if run_btn:
             st.info("추천할 영화를 찾지 못했어요. (필터를 낮추거나 최근 연도를 늘려보세요.)")
             st.stop()
 
+    # Session state에 저장 (우선순위 개선점 #3)
     st.session_state.result = {
         "top3": top3,
         "main_genre": main_genre,
@@ -394,7 +371,7 @@ if run_btn:
 
 
 # =========================
-# Render result
+# Render result (if exists)
 # =========================
 if st.session_state.result:
     top3 = st.session_state.result["top3"]
@@ -402,18 +379,14 @@ if st.session_state.result:
     sub_genres = st.session_state.result["sub_genres"]
 
     label = main_genre if not sub_genres else f"{main_genre} + {sub_genres[0]}"
+    st.markdown(f"## 🎉 당신에게 딱인 장르는: **{label}**!")
+    st.caption(f"메인 취향: {main_genre} · 서브 취향: {', '.join(sub_genres) if sub_genres else '없음'}")
 
-    # 깔끔한 헤더 카드 느낌
-    with st.container(border=True):
-        st.markdown(f"## 🎉 당신에게 딱인 장르는: **{label}**!")
-        st.caption(f"메인 취향: {main_genre} · 서브 취향: {', '.join(sub_genres) if sub_genres else '없음'}")
-
-    st.write("")
-
-    # ✅ 고정 크기 그래프(스크롤로 크기 변동 없음)
+    # 우선순위 개선점 #1/2와 연결: 점수 바 차트(시각화)
     norm = normalize_scores(st.session_state.scores)
+    chart_data = {g: norm.get(g, 0.0) for g in ["드라마", "로맨스", "코미디", "액션", "SF", "판타지"]}
     st.markdown("#### 🎯 당신의 장르 성향(상대 점수)")
-    render_genre_bar_fixed(norm)
+    st.bar_chart(chart_data)
 
     with st.expander("왜 이렇게 추천했나요?"):
         st.write(st.session_state.result["reason_text"])
@@ -421,6 +394,7 @@ if st.session_state.result:
     st.divider()
     st.subheader("🎥 추천 영화")
 
+    # 3-column cards
     cols = st.columns(3)
     for i, m in enumerate(st.session_state.candidates):
         col = cols[i % 3]
@@ -437,7 +411,7 @@ if st.session_state.result:
                     st.image("https://via.placeholder.com/500x750?text=No+Poster", use_container_width=True)
 
                 st.markdown(f"**{title}**")
-                st.markdown(f"<div class='movie-meta'>⭐ <b>{rating:.1f}</b> / 10</div>", unsafe_allow_html=True)
+                st.write(f"⭐ **{rating:.1f}** / 10")
 
                 with st.expander("상세 보기"):
                     with st.spinner("상세 정보를 불러오는 중..."):
