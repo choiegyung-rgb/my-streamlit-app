@@ -267,7 +267,7 @@ with st.sidebar:
     region = st.selectbox("지역(region)", ["KR", "US", "JP", "GB"], index=0)
 
     min_vote_count = st.slider("최소 투표 수(vote_count.gte)", 0, 5000, 200, step=50)
-    min_vote_average = st.slider("최소 평점(vote_average.gte)", 0.0, 9.0, 6.6, step=0.1)
+    min_vote_average = st.slider("최소 평점(vote_average.gte)", 0.0, 10.0, 6.6, step=0.1)
     years_back = st.slider("최근 몇 년 작품 위주", 0, 30, 10, step=1)
     st.caption("필터를 올릴수록 추천이 ‘깔끔’해지지만 결과가 줄어들 수 있어요.")
 
@@ -438,3 +438,4 @@ if st.session_state.result:
                         st.link_button("예고편 보기(YouTube)", trailer)
 else:
     st.info("왼쪽에서 TMDB 키를 입력하고, 질문에 답한 뒤 **결과 보기**를 눌러주세요!")
+
